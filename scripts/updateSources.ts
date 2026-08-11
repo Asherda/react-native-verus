@@ -3,10 +3,10 @@
 // It will download third-party source code, modify it,
 // and install it into the correct locations.
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { deepList, justFiles, makeNodeDisklet, navigateDisklet } from 'disklet'
 import { existsSync, mkdirSync } from 'fs'
-import { join, basename, dirname } from 'path'
+import { join } from 'path'
 
 import { copyCheckpoints } from './copyCheckpoints'
 
@@ -28,67 +28,62 @@ function downloadSources(): void {
     // 2.0.3:
     'f6d871b292555f849abbd7b5626fcbdc41be9333'
   )
+  // This commit's Cargo.lock is what decides the librustzcash revision, so bump
+  // the two together: 860e4fe locked 787409ea's predecessor, whose proto.rs
+  // disagreed with its own service.proto and so only compiled on machines
+  // without protoc installed. This one locks 787409ea:
   getRepo(
     'zcash-light-client-ffi',
-    'https://github.com/VerusCoin/verus-lightclient-ffi.git',
-    // 0.4.0:
-    '860e4fe7827fa12ea7c2b42766df88e8747bf0ae'
+    'https://github.com/asherda/verus-lightclient-ffi.git',
+    '51554ee978023ce8200f403c7cc94a00a530bb8b'
   )
 }
 
 async function rebuildXcframework(): Promise<void> {
-  console.log("Creating XCFramework…");
+  console.log('Creating XCFramework…')
 
   // Always start from a clean XCFramework
-  await disklet.delete("ios/libzcashlc.xcframework");
+  await disklet.delete('ios/libzcashlc.xcframework')
 
-  const vendorRoot = join(__dirname, "..", "tmp", "zcash-light-client-ffi");
+  const vendorRoot = join(__dirname, '..', 'tmp', 'zcash-light-client-ffi')
 
-  loudExec(tmp,
-    ["bash",
-    "-lc",
+  loudExec(tmp, [
+    'bash',
+    '-lc',
     `
       set -euo pipefail
       cd "${vendorRoot}"
       make clean
       make install
       make xcframework
-    `,
-  ]);
+    `
+  ])
 
   await disklet.setData(
-    "tmp/lib/ios-simulator/libzcashlc.a",
+    'tmp/lib/ios-simulator/libzcashlc.a',
     await disklet.getData(
-      "tmp/zcash-light-client-ffi/products/ios-simulator/universal/libzcashlc.a"
+      'tmp/zcash-light-client-ffi/products/ios-simulator/universal/libzcashlc.a'
     )
-  );
+  )
   await disklet.setData(
-    "tmp/lib/ios/libzcashlc.a",
+    'tmp/lib/ios/libzcashlc.a',
     await disklet.getData(
-      "tmp/zcash-light-client-ffi/products/ios-device/universal/libzcashlc.a"
+      'tmp/zcash-light-client-ffi/products/ios-device/universal/libzcashlc.a'
     )
-  );
+  )
 
-  await disklet.setText(
-    "ios/ZCashLightClientKit/Rust/zcashlc.h",
-    await disklet.getText(
-      "tmp/zcash-light-client-ffi/rust/target/Headers/zcashlc.h"
-    )
-  );
+  loudExec(tmp, [
+    'xcodebuild',
+    '-create-xcframework',
+    '-library',
+    join(__dirname, '../tmp/lib/ios-simulator/libzcashlc.a'),
+    '-library',
+    join(__dirname, '../tmp/lib/ios/libzcashlc.a'),
+    '-output',
+    join(__dirname, '../ios/libzcashlc.xcframework')
+  ])
 
-  loudExec(
-    tmp,
-    ["xcodebuild",
-    "-create-xcframework",
-    "-library",
-    join(__dirname, "../tmp/lib/ios-simulator/libzcashlc.a"),
-    "-library",
-    join(__dirname, "../tmp/lib/ios/libzcashlc.a"),
-    "-output",
-    join(__dirname, "../ios/libzcashlc.xcframework"),
-  ]);
-
-  console.log("XCFramework created at ios/libzcashlc.xcframework");
+  console.log('XCFramework created at ios/libzcashlc.xcframework')
 }
 
 /**
@@ -131,13 +126,16 @@ async function copySwift(): Promise<void> {
     await toDisklet.setText(file, fixed)
   }
 
-  // Copy the Rust header into the Swift location:
-  await disklet.setText(
-    'ios/zcashlc.h',
-    await disklet.getText(
-      'tmp/zcash-light-client-ffi/releases/XCFramework/libzcashlc.xcframework/ios-arm64/libzcashlc.framework/Headers/zcashlc.h'
-    )
-  )
+  // Copy the generated Rust header into the Swift location. `make xcframework`
+  // copies it out of the Rust build without checking, so a missing or empty
+  // header here means codegen produced nothing:
+  const headerPath =
+    'tmp/zcash-light-client-ffi/releases/XCFramework/libzcashlc.xcframework/ios-arm64/libzcashlc.framework/Headers/zcashlc.h'
+  const header = await disklet.getText(headerPath).catch(() => '')
+  if (!header.includes('zcashlc_')) {
+    throw new Error(`cbindgen produced no usable header at ${headerPath}`)
+  }
+  await disklet.setText('ios/zcashlc.h', header)
 }
 
 /**
@@ -161,28 +159,14 @@ function getRepo(name: string, uri: string, hash: string): void {
 
   // Checkout:
   console.log(`Checking out ${name}...`)
-  execSync(`git checkout -f ${hash}`, {
-    cwd: path,
-    stdio: 'inherit',
-    encoding: 'utf8'
-  })
-}
-
-/**
- * Runs a command and returns its results.
- */
-function quietExec(argv: string[]): string {
-  return execSync(argv.join(' '), {
-    cwd: tmp,
-    encoding: 'utf8'
-  }).replace(/\n$/, '')
+  loudExec(path, ['git', 'checkout', '-f', hash])
 }
 
 /**
  * Runs a command and displays its results.
  */
 function loudExec(path: string, argv: string[]): void {
-  execSync(argv.join(' '), {
+  execFileSync(argv[0], argv.slice(1), {
     cwd: path,
     stdio: 'inherit',
     encoding: 'utf8'
@@ -193,4 +177,3 @@ main().catch(error => {
   console.log(error)
   process.exit(1)
 })
-
